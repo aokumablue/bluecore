@@ -16,6 +16,8 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+from bluecore.lib.core_utils import IS_WINDOWS
+
 from ._eval_config import EvalConfig, SingleQueryConfig
 from .cli_runner import detect_cli_binary
 from .utils import parse_skill_md
@@ -50,7 +52,7 @@ def _write_command_file(
         f"# {skill_name}\n\n"
         f"This skill handles: {skill_description}\n"
     )
-    command_file.write_text(command_content)
+    command_file.write_text(command_content, encoding="utf-8")
 
 
 def _build_query_cmd(binary: str, query: str, model: str | None) -> list[str]:
@@ -188,6 +190,10 @@ def run_single_query(
         skill_description: スキル説明文。
         query_cfg: timeout / project_root / model をまとめた設定オブジェクト。
     """
+    # select.select はソケット専用の Windows ではパイプ監視に使えないため明示的に失敗させる
+    if IS_WINDOWS:
+        raise RuntimeError("run_eval は Windows 未対応です（select.select がパイプに使えないため）")
+
     binary = detect_cli_binary()
     unique_id = uuid.uuid4().hex[:8]
     clean_name = f"{skill_name}-skill-{unique_id}"
@@ -326,7 +332,7 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="進捗を stderr に表示する")
     args = parser.parse_args()
 
-    eval_set = json.loads(Path(args.eval_set).read_text())
+    eval_set = json.loads(Path(args.eval_set).read_text(encoding="utf-8"))
     skill_path = Path(args.skill_path)
 
     if not (skill_path / "SKILL.md").exists():

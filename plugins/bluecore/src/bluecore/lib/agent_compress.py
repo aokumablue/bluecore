@@ -127,7 +127,7 @@ def load_agent(file_path: str | Path) -> dict[str, Any]:
         dict[str, Any]: 処理結果を返します。
 
     Raises:
-        例外は発生しません。
+        OSError: ファイルが読み込めない場合。
     """
     path = Path(file_path)
     content = path.read_text(encoding="utf-8")
@@ -154,13 +154,15 @@ def load_agents(agents_dir: str | Path) -> list[dict[str, Any]]:
     """ディレクトリからすべてのエージェントを読み込む。
 
     Args:
-        agents_dir: agents_dir の値
+        agents_dir: エージェント .md ファイルが配置されたディレクトリパス。
 
     Returns:
-        list[dict[str, Any]]: dict[str, Any] の一覧を返します。
+        list[dict[str, Any]]: エージェント定義 dict の一覧。
+            ディレクトリが存在しない場合は例外を出さず空リストを返す。
 
     Raises:
-        例外は発生しません。
+        OSError: ディレクトリ内のエージェントファイルが読み込めない場合
+            （load_agent の read_text から伝播）。
     """
     path = Path(agents_dir)
     return [load_agent(f) for f in sorted(path.glob("*.md"))]

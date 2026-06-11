@@ -3,12 +3,40 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# hooks.json の最長エントリ（600 秒）より先に自決して孫プロセスの孤立を防ぐ。
+# それより短い timeout のエントリでは Claude Code 側の kill が先に働く。
+DEFAULT_SUBPROCESS_TIMEOUT = 590.0
+
+
+def _subprocess_timeout() -> float:
+    """サブプロセスの timeout 秒数を環境変数から解決します。
+
+    Args:
+        なし
+
+    Returns:
+        BLUECORE_HOOK_TIMEOUT が正の有限数値ならその秒数、未設定・無効値なら既定の 590 秒。
+
+    Raises:
+        例外は発生しません。
+    """
+    raw = os.environ.get("BLUECORE_HOOK_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return DEFAULT_SUBPROCESS_TIMEOUT
+        if value > 0 and math.isfinite(value):
+            return value
+    return DEFAULT_SUBPROCESS_TIMEOUT
 
 
 def _runtime_python() -> tuple[str, Path | None]:
@@ -126,8 +154,9 @@ def main(argv: list[str] | None = None) -> int:
             text=True,
             capture_output=True,
             env=build_env(),
+            timeout=_subprocess_timeout(),
         )
-    except OSError as error:
+    except (OSError, subprocess.TimeoutExpired) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 

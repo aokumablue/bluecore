@@ -236,7 +236,7 @@ def format_fields(
     if tool_names:
         parts.append(f"**ツール**: {', '.join(tool_names)}")
     if files_modified:
-        parts.append(f"**変更ファイル**: {', '.join(files_modified[:5])}")
+        parts.append(f"**変更ファイル**: {', '.join(files_modified[:2])}")
     if content:
         parts.append(slim_context_content(content))
     parts.append("")
@@ -284,14 +284,21 @@ def slim_prompt(text: str, max_len: int = 160) -> str:
     return ""
 
 
-def slim_context_content(text: str, *, max_prose_lines: int = 6, max_prose_line_length: int = 160) -> str:
-    """本文を圧縮しつつ、フェンス付きコードブロックはそのまま残す。"""
+def slim_context_content(
+    text: str,
+    *,
+    max_prose_lines: int = 6,
+    max_prose_line_length: int = 160,
+    max_code_lines: int = 20,
+) -> str:
+    """本文を圧縮しつつ、フェンス付きコードブロックは行数上限つきで残す。"""
     if not text:
         return ""
 
     lines: list[str] = []
     in_code_block = False
     prose_lines = 0
+    code_lines = 0
 
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
@@ -301,11 +308,19 @@ def slim_context_content(text: str, *, max_prose_lines: int = 6, max_prose_line_
 
         if stripped.startswith("```"):
             in_code_block = not in_code_block
+            if in_code_block:
+                code_lines = 0
             lines.append(stripped)
             continue
 
         if in_code_block:
-            lines.append(line)
+            if code_lines >= max_code_lines:
+                if lines and lines[-1] != "...":
+                    lines.append("...")
+                continue
+            # 1 行が極端に長いコードで注入予算を食い潰さないよう行長もクリップする
+            lines.append(line[:max_prose_line_length])
+            code_lines += 1
             continue
 
         if prose_lines >= max_prose_lines:
@@ -317,5 +332,9 @@ def slim_context_content(text: str, *, max_prose_lines: int = 6, max_prose_line_
         if compacted:
             lines.append(compacted)
             prose_lines += 1
+
+    # 閉じフェンスなしで終端した場合は補完し、後続 Markdown の崩壊を防ぐ
+    if in_code_block:
+        lines.append("```")
 
     return "\n".join(lines)

@@ -1,6 +1,6 @@
 ---
 name: refactor-rollback
-description: refactor前にファイル単位ロールバック計画を確定し、失敗時の復旧を高速化する。
+description: refactor-prep 実行後にその出力（対象分割・グループ）を受けてファイル単位ロールバック計画を確定し、失敗時の復旧を高速化する。refactor-prep 未実行の段階では発動しない。
 context: fork
 user-invocable: false
 ---
@@ -61,18 +61,6 @@ Order:
 Skip Rules:
   - {file}: {reason} (required_action={manual_review|extra_test|keep})
 ──────────────────────────────
-```
-
-必須キー:
-
-```json
-{
-  "file_rules": [{"file": "path/a.py", "revert": "git checkout -- path/a.py", "verify": "python3 -m pytest -q tests/test_a.py", "risk": "CAUTION"}],
-  "revert_files": ["path/a.py"],
-  "deps_order": [{"from": 1, "to": 0}],
-  "risk_files": [{"file": "path/a.py", "risk": "CAUTION", "reason": "public_api", "action": "manual_review"}],
-  "skip_rules": [{"file": "path/a.py", "reason": "dynamic_reference", "required_action": "extra_test"}]
-}
 ```
 
 ## ルール

@@ -322,14 +322,12 @@ def _collect_pg_dashboard_data(
         if not pg.test_connection():
             return empty
         try:
-            pg_conn = pg._get_conn()
             try:
-                pg_available, team_ranking, team_trend, pg_data = _fetch_pg_panel_data(pg, pg_conn, days)
+                with pg.transaction() as pg_conn:
+                    pg_available, team_ranking, team_trend, pg_data = _fetch_pg_panel_data(pg, pg_conn, days)
             except Exception as e:
                 log.warning("既存パネルデータ取得失敗: %s", e)
                 pg_available, team_ranking, team_trend, pg_data = False, [], [], dict(_PG_DATA_EMPTY)
-            finally:
-                pg._put_conn(pg_conn)
         finally:
             pg.close()
         return pg_available, team_ranking, team_trend, pg_data
@@ -473,7 +471,11 @@ def handle_dashboard(
     deps: DashboardDeps,
 ) -> None:
     """静的 HTML ダッシュボードを生成する。"""
-    days = stdin_data.get("days", 30)
+    try:
+        days = int(stdin_data.get("days", 30))
+    except (TypeError, ValueError):
+        print(json.dumps({"success": False, "error": "days must be an integer"}))
+        return
     output_default = str(Path(settings.data_path) / "bluecore-dashboard.html")
     output_path = _resolve_safe_dashboard_output_path(settings, stdin_data.get("output", output_default))
     if output_path is None:
@@ -485,7 +487,7 @@ def handle_dashboard(
     pg_available, team_ranking, team_trend, pg_data = _collect_pg_dashboard_data(settings, days, log=deps.log)
     item_vars = _build_item_ranking_vars(personal_ranking, team_ranking, personal_trend, team_trend)
     skill_health = deps.collect_skill_health_overview_fn(dict(stdin_data))
-    skill_growth = deps.collect_skill_growth_overview_fn(settings, int(days))
+    skill_growth = deps.collect_skill_growth_overview_fn(settings, days)
     project_overview = deps.collect_project_overview_fn()
     dash_data = DashboardData(
         days=days,

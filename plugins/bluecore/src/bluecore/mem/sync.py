@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import re
 import sqlite3
 import struct
 import time
@@ -35,8 +36,13 @@ from bluecore.mem.settings import Settings
 log = _get_logger("SYNC")
 
 
+# 文中に埋め込まれた接続 URL（例外メッセージ等）の user:password@ を検出する。
+# パスワード部は貪欲マッチ + バックトラックで @ 含みパスワードにも対応する。
+_EMBEDDED_URL_PASSWORD_RE = re.compile(r"(://[^/\s:@]+):([^\s/]+)@")
+
+
 def _mask_url(url: str) -> str:
-    """接続 URL のパスワード部を *** に置換する。@ 含みパスワードにも対応する。"""
+    """接続 URL のパスワード部を *** に置換する。@ 含みパスワードと文中埋め込み URL に対応する。"""
     try:
         parsed = urlparse(url)
         if parsed.password is not None:
@@ -44,7 +50,7 @@ def _mask_url(url: str) -> str:
             return urlunparse(parsed._replace(netloc=netloc))
     except Exception:
         pass
-    return url
+    return _EMBEDDED_URL_PASSWORD_RE.sub(r"\1:***@", url)
 
 
 # 同期失敗後の最小リトライ間隔（秒）
@@ -440,7 +446,8 @@ def sync_to_postgres(
                 settings.save_sync_state()
             except Exception:
                 pass
-            log.error("同期エラー: %s", e, exc_info=True)
+            # traceback は DB ドライバのスタックに接続情報が混入し得るため出さず、メッセージはマスクする
+            log.error("同期エラー: %s", _mask_url(str(e)))
             return SyncResult(success=False, error=_mask_url(str(e)))
         finally:
             _close_sync_connections(sqlite_db, pg_db)
@@ -533,6 +540,10 @@ def _sync_embeddings(
 
     Returns:
         同期したエンベディング数
+
+    Raises:
+        Exception: vec テーブル不在以外の読み取り失敗・PG UPSERT 失敗時。
+            呼び出し元トランザクションの rollback で synced_at が立たず再同期される。
     """
     if not chunks:
         return 0
@@ -557,9 +568,13 @@ def _sync_embeddings(
                 vec = list(struct.unpack(f"{n_floats}f", raw_bytes))
                 embeddings.append((chunk_id, vec))
 
-    except Exception as e:
-        log.debug("sqlite-vec からの読み取りをスキップ: %s", e)
-        return 0
+    except sqlite3.OperationalError as e:
+        # sqlite-vec 拡張なし環境では vec テーブルが存在しない（正常系スキップ）。
+        # それ以外の読み取り失敗は伝播させ、トランザクション rollback で再同期可能にする。
+        if "no such table" in str(e):
+            log.debug("sqlite-vec からの読み取りをスキップ: %s", e)
+            return 0
+        raise
 
     if not embeddings:
         return 0

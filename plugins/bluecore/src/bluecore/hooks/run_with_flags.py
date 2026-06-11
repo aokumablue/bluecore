@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
@@ -22,6 +23,33 @@ from bluecore.hooks.hook_common import (
 from bluecore.lib.hook_flags import is_hook_enabled
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# hooks.json の最長エントリ（600 秒）より先に自決して孫プロセスの孤立を防ぐ。
+# それより短い timeout のエントリでは Claude Code 側の kill が先に働く。
+DEFAULT_SUBPROCESS_TIMEOUT = 590.0
+
+
+def _subprocess_timeout() -> float:
+    """サブプロセスの timeout 秒数を環境変数から解決します。
+
+    Args:
+        なし
+
+    Returns:
+        BLUECORE_HOOK_TIMEOUT が正の有限数値ならその秒数、未設定・無効値なら既定の 590 秒。
+
+    Raises:
+        例外は発生しません。
+    """
+    raw = os.environ.get("BLUECORE_HOOK_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return DEFAULT_SUBPROCESS_TIMEOUT
+        if value > 0 and math.isfinite(value):
+            return value
+    return DEFAULT_SUBPROCESS_TIMEOUT
 
 # 入力切り捨て時に config-protection をバイパスさせないためのガード対象 hook id 集合。
 # 設定ファイル保護は truncated payload を見逃すとバイパスに悪用されうるため、
@@ -180,7 +208,7 @@ def _run_target(hook_id: str, target: str, target_args: list[str], raw: str) -> 
         raw: 子プロセスへ渡す stdin。
 
     Returns:
-        子プロセスの終了コード。OSError 発生時は 1。
+        子プロセスの終了コード。OSError・timeout 超過時は 1。
     """
     try:
         result = subprocess.run(
@@ -189,8 +217,9 @@ def _run_target(hook_id: str, target: str, target_args: list[str], raw: str) -> 
             text=True,
             capture_output=True,
             env=build_env(),
+            timeout=_subprocess_timeout(),
         )
-    except OSError as err:
+    except (OSError, subprocess.TimeoutExpired) as err:
         write_stderr(f"[Hook] Error running {hook_id}: {err}\n")
         return 1
 

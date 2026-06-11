@@ -129,7 +129,7 @@ def _format_history_section(history: list[dict]) -> str:
 def _shorten_description_if_needed(
     description: str,
     prompt: str,
-    model: str,
+    model: str | None,
     transcript: dict,
 ) -> str:
     """1024 文字超の説明を再度 LLM に短縮依頼し、短縮版を返す。"""
@@ -159,7 +159,7 @@ def _shorten_description_if_needed(
 
 def improve_description(
     ctx: ImproveContext,
-    model: str,
+    model: str | None,
     log_dir: Path | None = None,
     iteration: int | None = None,
 ) -> str:
@@ -185,7 +185,7 @@ def improve_description(
     if log_dir:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"improve_iter_{iteration or 'unknown'}.json"
-        log_file.write_text(json.dumps(transcript, indent=2))
+        log_file.write_text(json.dumps(transcript, indent=2), encoding="utf-8")
 
     return description
 
@@ -227,10 +227,10 @@ def main():
         print(f"エラー: {skill_path} に SKILL.md が見つかりません", file=sys.stderr)
         sys.exit(1)
 
-    eval_results = json.loads(Path(args.eval_results).read_text())
+    eval_results = json.loads(Path(args.eval_results).read_text(encoding="utf-8"))
     history = []
     if args.history:
-        history = json.loads(Path(args.history).read_text())
+        history = json.loads(Path(args.history).read_text(encoding="utf-8"))
 
     name, _, content = parse_skill_md(skill_path)
     current_description = eval_results["description"]
