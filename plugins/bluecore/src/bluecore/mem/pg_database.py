@@ -26,6 +26,10 @@ if TYPE_CHECKING:
 
 log = _get_logger("PG")
 
+# PG 到達不能（パケット drop 等）時に OS の TCP タイムアウト（Linux で 130 秒前後）
+# までフックがブロックするのを防ぐ接続タイムアウト（秒）。
+_CONNECT_TIMEOUT = 5
+
 def _is_loopback(url: str) -> bool:
     """URL のホストがローカルループバックか判定する。
 
@@ -56,7 +60,8 @@ def _ensure_ssl(url: str) -> str:
       - disable/allow/prefer: リモートホスト時のみ警告（ローカルは静か）
       - require: verify-full 推奨の警告を出して維持
       - verify-full 等: そのまま維持
-    - sslmode 未指定: sslmode=require を自動付与（安全側デフォルト）
+    - sslmode 未指定: ループバック接続は sslmode=disable、それ以外は
+      sslmode=require を自動付与（安全側デフォルト）
     """
     parsed = urlparse(url)
     qs = parse_qs(parsed.query, keep_blank_values=True)
@@ -116,7 +121,12 @@ class PgDatabase:
                 try:
                     from psycopg_pool import ConnectionPool
 
-                    self._pool = ConnectionPool(_ensure_ssl(self._url), kwargs={"passfile": passfile}, min_size=1, max_size=4)
+                    self._pool = ConnectionPool(
+                        _ensure_ssl(self._url),
+                        kwargs={"passfile": passfile, "connect_timeout": _CONNECT_TIMEOUT},
+                        min_size=1,
+                        max_size=4,
+                    )
                 except ImportError:
                     # psycopg_pool 未インストール時はフォールバック
                     log.debug("psycopg_pool が見つかりません。単一接続を使用します")
@@ -127,7 +137,7 @@ class PgDatabase:
         if self._conn is None or self._conn.closed:
             import psycopg
 
-            self._conn = psycopg.connect(_ensure_ssl(self._url), passfile=passfile)
+            self._conn = psycopg.connect(_ensure_ssl(self._url), passfile=passfile, connect_timeout=_CONNECT_TIMEOUT)
         return self._conn
 
     def _put_conn(self, conn: psycopg.Connection) -> None:

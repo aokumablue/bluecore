@@ -148,8 +148,18 @@ BACKGROUND_HOOK_IDS: frozenset[str] = frozenset(
         "stop:evaluate-session",
         "session:end:marker",
         "session:mem:end",
+        "session:mem:sync-check",
     }
 )
+
+
+# detach 起動した子の実行時間上限（秒）。start_new_session=True の子はハーネスの
+# timeout で kill されないため、coreutils timeout で自決させる。hooks.json の
+# 最長エントリ（600 秒）より先に終わるよう 590 とする。
+# --kill-after は GNU coreutils 固有のため Linux 前提（BSD/macOS の timeout は不可）。
+DETACH_TIMEOUT_SECONDS = 590
+# SIGTERM を無視して詰まったプロセスを SIGKILL で確実に回収するまでの猶予（秒）。
+_DETACH_KILL_AFTER_SECONDS = 30
 
 
 def detach_process(cmd: list[str], raw_stdin: str, *, env: dict[str, str] | None = None) -> bool:
@@ -159,6 +169,10 @@ def detach_process(cmd: list[str], raw_stdin: str, *, env: dict[str, str] | None
     world-writable な /tmp を避けて ~/.bluecore 配下に作成し、close→reopen の
     TOCTOU 窓を作らないよう同一 fd を seek(0) して子へ継承する。起動直後に
     unlink する（継承済み fd は有効なまま）。
+
+    detach 後の子はハーネスの timeout の管轄外になるため、coreutils timeout で
+    ラップして DETACH_TIMEOUT_SECONDS で SIGTERM、さらに猶予後 SIGKILL を送り、
+    暴走プロセスの無期限残留を防ぐ。
 
     Args:
         cmd: subprocess に渡すコマンドリスト。
@@ -184,7 +198,12 @@ def detach_process(cmd: list[str], raw_stdin: str, *, env: dict[str, str] | None
         tmp.flush()
         tmp.seek(0)
         subprocess.Popen(
-            cmd,
+            [
+                "timeout",
+                f"--kill-after={_DETACH_KILL_AFTER_SECONDS}",
+                str(DETACH_TIMEOUT_SECONDS),
+                *cmd,
+            ],
             stdin=tmp,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

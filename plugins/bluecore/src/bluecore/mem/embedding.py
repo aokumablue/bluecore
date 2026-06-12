@@ -7,12 +7,17 @@ install.sh が python3 -m model_build build を実行してモデルを生成す
 
 from __future__ import annotations
 
+import fcntl
 import hmac
 import json
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 from bluecore.lib.constants import BASE_DIR_NAME
 from bluecore.mem._paths import sha256_file as _sha256_file
@@ -37,6 +42,9 @@ def _mean_pool_l2(token_embs: Any, attention_mask: Any) -> Any:
 
 # 統合済み model.onnx は ~/.bluecore/models/ に格納（install.sh が配置）
 _MODELS_DIR = Path.home() / BASE_DIR_NAME / "models"
+
+# モデルロードのプロセス間直列化用ロックファイル
+_LOCK_PATH = Path.home() / BASE_DIR_NAME / "embedding.lock"
 
 # セッションはプロセス内でシングルトン（スレッドセーフ）
 _session: Any = None
@@ -112,12 +120,15 @@ def _check_model_files(model_path: Any, tok_path: Any) -> bool:
 
 
 def _build_onnx_session(model_path: Any) -> Any:
-    """ONNX モデルを検証してセッションを構築する（SHA 検証済み前提）。"""
+    """ONNX セッションを構築する（SHA 検証済み前提）。
+
+    onnx.checker.check_model は呼ばない: Protobuf をメモリ上に全展開するため
+    数百 MB のモデルでロードが二重化し、フックプロセスごとに 1 GB 超の
+    メモリスパイクを起こす。改竄検出は _verify_model_sha の SHA256 照合で、
+    グラフ妥当性検証はビルド時の model_build.verify で担保済み。
+    """
     import onnxruntime as ort  # type: ignore[import-untyped]
 
-    import onnx  # type: ignore[import-untyped]
-
-    onnx.checker.check_model(str(model_path))
     sess_opts = ort.SessionOptions()
     sess_opts.log_severity_level = 3
     sess_opts.enable_mem_pattern = False
@@ -135,15 +146,33 @@ def _build_tokenizer(tok_path: Any) -> Any:
     return tok
 
 
+@contextmanager
+def _model_load_lock() -> Generator[None, None, None]:
+    """モデルロードをプロセス間で直列化する fcntl 排他ロック。
+
+    フックは毎回独立プロセスで起動するため threading.Lock では多重ロードを
+    防げない。複数プロセスが同時に数百 MB のモデルをロードすると合計数 GB の
+    メモリスパイクでスワップ突入し OS 全体が不安定になるため、ロード区間を
+    システム全体で 1 プロセスに制限する（ブロッキング取得・先行プロセスの
+    ロード完了を待つ）。"""
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_LOCK_PATH, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def _load_session_unlocked() -> tuple[Any, Any] | tuple[None, None]:
-    """ロック取得済みの状態でセッション初期化を行う内部関数。"""
+    """ロック取得済みの状態でセッション初期化を行う内部関数。
+
+    _lock と _model_load_lock の両方を取得済みの前提で呼ぶ。モデルファイルの
+    存在確認は呼び出し元（_get_session）がロック取得前に実施済み。
+    """
     global _session, _tokenizer  # noqa: PLW0603
     model_path = _MODELS_DIR / "model.onnx"
     tok_path = _MODELS_DIR / "tokenizer.json"
-
-    unavailable = _check_model_files(model_path, tok_path)
-    if unavailable:
-        return (None, None)
 
     log.info("モデルロード: %s@%s", _DEFAULT_EMBEDDING_MODEL, _DEFAULT_EMBEDDING_REVISION[:8])
     try:
@@ -169,13 +198,22 @@ def _get_session() -> tuple[Any, Any] | tuple[None, None]:
     これにより、部分的に初期化された状態が外部から見えることを防ぐ（CWE-667 / 状態不整合防止）。
 
     model.onnx が存在しない場合（バックグラウンドビルド中など）は (None, None) を返す。
+    この判定は _model_load_lock の取得前に行い、ビルド中に他プロセスのロード待ちで
+    無意味にブロックしないようにする。
     _onnx_unavailable_warned はプロセス内で 1 度だけ警告を出すフラグ。
     ビルド完了後は model.onnx が配置されてこの分岐を通らなくなるため問題ない。
     ONNX ビルド完了後のモデル利用はプロセス再起動後に反映される。
+
+    フックは単一スレッドの独立プロセスとして起動される前提。_lock 保持中に
+    _model_load_lock をブロッキング取得するため、プロセス内マルチスレッドで
+    embed() を併用する設計に変える場合はロック順序の見直しが必要。
     """
     with _lock:
         if _session is None or _tokenizer is None:
-            return _load_session_unlocked()
+            if _check_model_files(_MODELS_DIR / "model.onnx", _MODELS_DIR / "tokenizer.json"):
+                return (None, None)
+            with _model_load_lock():
+                return _load_session_unlocked()
         return _session, _tokenizer
 
 
