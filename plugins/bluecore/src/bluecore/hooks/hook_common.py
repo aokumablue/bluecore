@@ -7,9 +7,14 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+from bluecore.hooks.output_adapter import adapt_context_output, emit_block
 
 MAX_STDIN_BYTES = 1024 * 1024
 
@@ -130,28 +135,110 @@ SESSION_START_HOOK_IDS: frozenset[str] = frozenset(
 )
 
 
+# hooks.json で "async": true 指定されている run_with_flags 経由の hook_id 集合。
+# Claude Code はホスト側で非同期実行するが、Codex 等 async 未サポートのハーネスでは
+# run_with_flags が子プロセスを detach してフックを即時終了させる。
+# hooks.json の async エントリを増減する際はここも更新する。
+BACKGROUND_HOOK_IDS: frozenset[str] = frozenset(
+    {
+        "pre:observe",
+        "user:mem:sync-check",
+        "post:quality-gate",
+        "stop:session-end",
+        "stop:evaluate-session",
+        "session:end:marker",
+        "session:mem:end",
+    }
+)
+
+
+def detach_process(cmd: list[str], raw_stdin: str, *, env: dict[str, str] | None = None) -> bool:
+    """コマンドを detached（新セッション）で起動し stdin を一時ファイル経由で渡す。
+
+    親プロセスの終了に影響されず子を走らせ続けるために使う。一時ファイルは
+    world-writable な /tmp を避けて ~/.bluecore 配下に作成し、close→reopen の
+    TOCTOU 窓を作らないよう同一 fd を seek(0) して子へ継承する。起動直後に
+    unlink する（継承済み fd は有効なまま）。
+
+    Args:
+        cmd: subprocess に渡すコマンドリスト。
+        raw_stdin: 子プロセスへ渡す stdin の内容。
+        env: 子プロセスの環境変数。None なら親の環境を継承する。
+
+    Returns:
+        起動に成功した場合 True、OSError 時は False。
+
+    Raises:
+        例外は発生しません。
+    """
+    try:
+        private_dir = Path.home() / ".bluecore"
+        private_dir.mkdir(parents=True, exist_ok=True)
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w+", encoding="utf-8", suffix=".stdin", dir=private_dir, delete=False
+        )
+    except OSError:
+        return False
+    try:
+        tmp.write(raw_stdin)
+        tmp.flush()
+        tmp.seek(0)
+        subprocess.Popen(
+            cmd,
+            stdin=tmp,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+    finally:
+        tmp.close()
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def emit_block_output(reason: str) -> int:
+    """ツール実行ブロックをハーネス別プロトコルで stdout/stderr に書き出す。
+
+    launcher から直接起動されるブロック系フック（run_with_flags の exit code
+    変換を経由しないもの）はこのヘルパを使うこと。
+
+    Args:
+        reason: ブロック理由（ユーザー / エージェントに提示される）。
+
+    Returns:
+        フックが返すべき終了コード。
+
+    Raises:
+        例外は発生しません。
+    """
+    exit_code, deny_out, reason_err = emit_block(reason)
+    if deny_out:
+        write_stdout(deny_out)
+    if reason_err:
+        write_stderr(reason_err + "\n")
+    return exit_code
+
+
 def _emit_hook_specific_output(event_name: str, additional_context: str) -> str:
-    """hookSpecificOutput でラップした JSON 文字列を返す。
+    """コンテキスト注入出力を実行中ハーネスのプロトコルで返す。
 
     Args:
         event_name: hookEventName に設定するイベント名。
         additional_context: コンテキストに注入する追加文字列。
 
     Returns:
-        hookSpecificOutput を含む JSON 文字列。
+        ハーネスのプロトコルに適合した JSON 文字列。
 
     Raises:
         例外は発生しません。
     """
-    return json.dumps(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": event_name,
-                "additionalContext": additional_context,
-            }
-        },
-        ensure_ascii=False,
-    )
+    return adapt_context_output(event_name, additional_context)
 
 
 def emit_session_start_output(additional_context: str = "") -> str:

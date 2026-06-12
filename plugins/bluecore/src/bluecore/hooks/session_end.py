@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
-from bluecore.hooks.hook_common import parse_json_object, read_raw_stdin
+from bluecore.hooks.hook_common import detach_process, parse_json_object, read_raw_stdin
 from bluecore.lib.core_utils import (
     ensure_dir,
     get_date_string,
@@ -27,6 +28,7 @@ from bluecore.lib.core_utils import (
     strip_ansi,
     write_file,
 )
+from bluecore.lib.harness import detect_harness, extract_file_paths, normalize_tool_name
 from bluecore.lib.slim_text import compact_line
 
 SUMMARY_START_MARKER = "<!-- bluecore:SUMMARY:START -->"
@@ -52,27 +54,42 @@ def _collect_user_message(entry: dict) -> str:
     return compact_line(strip_ansi(text).strip(), 200)
 
 
+def _record_tool_use(tool_name: str, tool_input: object, tools_used: set, files_modified: set) -> None:
+    """ツール名を正規化して記録し、編集系ツールなら対象ファイルパスを収集する。
+
+    Codex の apply_patch は Edit へ正規化し、パッチテキストから全対象
+    ファイルを抽出する。
+
+    Args:
+        tool_name: トランスクリプト上のツール名（正規化前）。
+        tool_input: ツール入力。dict 以外は空入力として扱う。
+        tools_used: 使用ツール名の収集先。
+        files_modified: 変更ファイルパスの収集先。
+
+    Raises:
+        例外は発生しません。
+    """
+    if not tool_name:
+        return
+    normalized = normalize_tool_name(tool_name)
+    tools_used.add(normalized)
+    if normalized not in ("Edit", "Write", "MultiEdit"):
+        return
+    paths = extract_file_paths(tool_name, tool_input if isinstance(tool_input, dict) else {})
+    files_modified.update(paths or [])
+
+
 def _collect_tool_use(entry: dict, tools_used: set, files_modified: set) -> None:
     """直接の tool_use エントリおよび assistant ブロックからツール名とファイルパスを収集する。"""
     if entry.get("type") == "tool_use" or entry.get("tool_name"):
         tool_name = entry.get("tool_name") or entry.get("name") or ""
-        if tool_name:
-            tools_used.add(tool_name)
         tool_input = entry.get("tool_input") or entry.get("input") or {}
-        file_path = tool_input.get("file_path") or tool_input.get("path") or ""
-        if file_path and tool_name in ("Edit", "Write", "MultiEdit"):
-            files_modified.add(file_path)
+        _record_tool_use(tool_name, tool_input, tools_used, files_modified)
 
     if entry.get("type") == "assistant" and isinstance(entry.get("message", {}).get("content"), list):
         for block in entry["message"]["content"]:
             if isinstance(block, dict) and block.get("type") == "tool_use":
-                tool_name = block.get("name", "")
-                if tool_name:
-                    tools_used.add(tool_name)
-                block_input = block.get("input") or {}
-                file_path = block_input.get("file_path") or block_input.get("path") or ""
-                if file_path and tool_name in ("Edit", "Write", "MultiEdit"):
-                    files_modified.add(file_path)
+                _record_tool_use(block.get("name", ""), block.get("input") or {}, tools_used, files_modified)
 
 
 def extract_session_summary(transcript_path: str) -> dict | None:
@@ -371,12 +388,34 @@ def run(raw_input: str) -> str:
     return raw_input
 
 
+def _trigger_codex_session_end_fallback(raw: str) -> None:
+    """Codex では SessionEnd イベントが無いため Stop で mem session-end を起動する。
+
+    mem session-end は未エンベッドチャンクの差分処理で冪等なため、ターンごとの
+    起動でもコストは新規チャンク分のみ。detached 起動でセッションをブロックしない。
+
+    Args:
+        raw: フックに渡された生の stdin（session_id を含む JSON）。
+
+    Returns:
+        None: 値を返しません。
+
+    Raises:
+        例外は発生しません。
+    """
+    if detect_harness() != "codex":
+        return
+    if not detach_process([sys.executable, "-m", "bluecore.mem.cli", "session-end"], raw):
+        log("[SessionEnd] mem session-end fallback の起動に失敗しました")
+
+
 def main() -> int:
     """スクリプトとして実行されたときのエントリポイント"""
 
     try:
         raw = read_raw_stdin()
         run(raw)
+        _trigger_codex_session_end_fallback(raw)
         return 0
     except Exception as err:
         log(f"[SessionEnd] Error: {err}")
@@ -384,6 +423,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import sys
-
     sys.exit(main())

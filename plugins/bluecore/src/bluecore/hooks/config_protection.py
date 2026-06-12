@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from bluecore.hooks.hook_common import basename, parse_json_object, read_raw_stdin, write_stderr
+from bluecore.lib.harness import extract_file_paths
 
 PROTECTED_FILES = {
     ".eslintrc",
@@ -46,6 +47,10 @@ PROTECTED_FILES = {
     ".markdownlint.json",
     ".markdownlint.yaml",
     ".markdownlintrc",
+    # ONNX ダウンロード設定。model_url / sha256 / ssl_no_verify が
+    # ダウンロード完全性検証の信頼アンカーのため、エージェントによる
+    # 書き換え（URL 差し替え + 偽ハッシュ + 検証無効化）をブロックする
+    "onnx.json",
 }
 
 
@@ -85,9 +90,19 @@ def main() -> int:
 
     data = parse_json_object(raw)
     if data:
+        tool_name = str(data.get("tool_name") or "")
         tool_input = data.get("tool_input") or {}
-        file_path = str(tool_input.get("file_path") or tool_input.get("file") or "")
-        if file_path:
+        file_paths = extract_file_paths(tool_name, tool_input)
+        if file_paths is None:
+            # apply_patch のパッチがパース不能: 保護対象か判定できないため fail-closed
+            write_stderr("BLOCKED: Could not determine target files from patch input.\n")
+            return 2
+        if not file_paths:
+            # 旧形式の file フィールドのみ持つ入力を補完する
+            legacy = str(tool_input.get("file") or "")
+            if legacy:
+                file_paths = [legacy]
+        for file_path in file_paths:
             file_name = basename(file_path)
             if file_name in PROTECTED_FILES:
                 write_stderr(blocked_message_for_file(file_name) + "\n")
