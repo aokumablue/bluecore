@@ -1,0 +1,40 @@
+{
+  "name": "bluecore",
+  "owner": {
+    "name": "aokumablue"
+  },
+  "metadata": {
+    "description": "開発に必要な汎用プラグイン集です。エージェント、スキル、フック、コマンドをまとめて導入し、計画・実装・検証・レビューの流れを揃えます。"
+  },
+  "plugins": [
+    {
+      "name": "bluecore",
+      "source": "./plugins/bluecore",
+      "description": "開発に必要な汎用プラグイン集です。エージェント、スキル、フック、コマンドをまとめて導入し、計画・実装・検証・レビューの流れを揃えます。",
+      "version": "0.9.10",
+      "homepage": "https://github.com/aokumablue/bluecore",
+      "repository": "https://github.com/aokumablue/bluecore",
+      "license": "Apache-2.0",
+      "keywords": [
+        "agents",
+        "skills",
+        "commands",
+        "hooks",
+        "rules",
+        "workflow",
+        "plugin"
+      ],
+      "category": "workflow",
+      "tags": [
+        "agents",
+        "skills",
+        "commands",
+        "hooks",
+        "rules",
+        "workflow",
+        "plugin"
+      ],
+      "strict": false
+    }
+  ]
+}
