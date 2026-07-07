@@ -10,13 +10,18 @@ from typing import TYPE_CHECKING, Any
 from bluecore.hooks.hook_common import emit_user_prompt_submit_output
 from bluecore.lib.core_utils import get_git_user_name
 from bluecore.lib.harness import normalize_tool_name
-from bluecore.mem.cli_search_handlers import merge_search_results_rrf, render_adaptive_context
+from bluecore.mem.cli_search_handlers import (
+    merge_search_results_rrf,
+    render_adaptive_context,
+    render_digest_context,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
     from bluecore.mem.database import Database
+    from bluecore.mem.search import SearchResult
     from bluecore.mem.settings import Settings
 
     OpenDbFn = Callable[[Settings], AbstractContextManager[Database]]
@@ -55,6 +60,23 @@ def handle_context(
     return ctx
 
 
+def _exclude_digest_sessions(
+    db: Any,
+    results: list[SearchResult],
+    excluded_session_ids: set[str],
+) -> list[SearchResult]:
+    """digest ヒット済みセッションに属するチャンクを結果から除外する（重複注入防止）。"""
+    if not excluded_session_ids:
+        return results
+    filtered: list[SearchResult] = []
+    for result in results:
+        chunk = db.get_chunk_by_id(result.chunk_id)
+        if chunk is not None and chunk.session_id in excluded_session_ids:
+            continue
+        filtered.append(result)
+    return filtered
+
+
 def _search_and_inject_context(
     db: Any,
     settings: Settings,
@@ -63,11 +85,23 @@ def _search_and_inject_context(
     *,
     log: Any,
 ) -> None:
-    """プロンプトに関連するメモリを検索してコンテキストとして print する。"""
+    """プロンプトに関連するメモリを検索してコンテキストとして print する（digest 優先の2段検索）。
+
+    1. digest（セッション要約）を最優先で検索する（limit=1）。
+    2. 既存の chunk 検索（ローカル RRF + team）を行うが、digest がヒットした
+       session_id のチャンクは重複注入防止のため除外する。
+    3. digest 出力 + chunk 出力を連結して注入する（RRF には digest を混ぜない。
+       SearchResult がチャンク形状のため）。
+    """
     from bluecore.mem.search import SearchService
 
     svc = SearchService(db, settings)
+
+    digest_results = svc.search_digests(prompt, project=project, limit=1)
+    digest_session_ids = {r.digest.session_id for r in digest_results}
+
     local_results = svc.search(query=prompt, project=project, limit=3)
+    local_results = _exclude_digest_sessions(db, local_results, digest_session_ids)
 
     team_results = []
     if settings.sync.enabled and settings.sync.postgres_url:
@@ -79,9 +113,14 @@ def _search_and_inject_context(
             log.warning("チーム検索失敗（ローカルのみ使用）: %s", e)
 
     merged = merge_search_results_rrf(local_results, team_results, top_k=3)
-    if merged:
-        ctx = render_adaptive_context(db, merged)
-        print(emit_user_prompt_submit_output(ctx))
+
+    digest_ctx = render_digest_context(digest_results)
+    chunk_ctx = render_adaptive_context(db, merged) if merged else ""
+
+    # 両方非空の場合のみ改行区切り（`</mem-context><mem-context>` の隣接を防ぐ）。
+    combined = f"{digest_ctx}\n{chunk_ctx}" if digest_ctx and chunk_ctx else digest_ctx + chunk_ctx
+    if combined:
+        print(emit_user_prompt_submit_output(combined))
 
 
 def handle_session_init(
@@ -188,14 +227,16 @@ def handle_session_end(
     stdin_data: dict[str, Any],
     deps: SessionEndDeps,
 ) -> None:
-    """SessionEnd: 埋め込み一括生成 + FTS5 最適化"""
+    """SessionEnd: セッション終了記録 + 埋め込み一括生成 + FTS5 最適化 + セッション要約生成"""
     from bluecore.mem.bridge import sync_session_to_observations
+    from bluecore.mem.digest import generate_and_store_digest
 
     time_module = deps.time_module if deps.time_module is not None else time
     session_id = str(stdin_data.get("session_id", "") or "")
 
     try:
         with deps.open_db(settings) as db:
+            db.end_session(session_id)  # G3 修正: チャンクがゼロでも終了時刻を記録する
             chunks = db.get_chunks_by_session(session_id)
             if not chunks:
                 return
@@ -221,6 +262,16 @@ def handle_session_end(
                 deps.log.info("learn 同期: session=%s synced=%d", session_id, synced)
             except Exception as e:
                 deps.log.warning("learn 同期失敗: %s", e)
+
+            try:
+                generate_and_store_digest(
+                    db,
+                    session_id,
+                    transcript_path=str(stdin_data.get("transcript_path", "") or ""),
+                    log=deps.log,
+                )
+            except Exception as e:
+                deps.log.warning("digest 生成失敗: %s", e)
 
             _auto_compact_if_needed(db, settings, log=deps.log, time_module=time_module)
     except Exception as e:
