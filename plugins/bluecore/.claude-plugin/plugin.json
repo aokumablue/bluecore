@@ -1,6 +1,6 @@
 {
   "name": "bluecore",
-  "version": "0.9.16",
+  "version": "0.9.17",
   "description": "開発に必要な汎用プラグイン集です。エージェント、スキル、フック、コマンドをまとめて導入し、計画・実装・検証・レビューの流れを揃えます。",
   "author": {
     "name": "aokumablue"
@@ -13,7 +13,6 @@
     "skills",
     "commands",
     "hooks",
-    "rules",
     "workflow",
     "plugin"
   ],
@@ -21,6 +20,7 @@
     "./agents/bench-analyzer.md",
     "./agents/architect.md",
     "./agents/dead-code-cleaner.md",
+    "./agents/executor.md",
     "./agents/comparator.md",
     "./agents/explorer.md",
     "./agents/grader.md",

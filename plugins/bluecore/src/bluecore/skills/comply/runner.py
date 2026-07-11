@@ -7,6 +7,7 @@ copilot 環境: json 出力を完了後に一括解析。
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 import shutil
@@ -19,9 +20,13 @@ from ..cli_runner import build_output_format_args, build_tools_args, detect_cli_
 from .parser import ObservationEvent
 from .scenario_generator import Scenario
 
+log = logging.getLogger(__name__)
+
 SANDBOX_BASE = Path(tempfile.gettempdir()) / "comply-sandbox"
 ALLOWED_MODELS = frozenset({"haiku", "sonnet", "opus"})
 _ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+_SETUP_TIMEOUT = 60
+"""サンドボックスの各セットアップコマンドに課すハードタイムアウト（秒）。"""
 
 
 @dataclass(frozen=True)
@@ -107,11 +112,15 @@ def _setup_sandbox(sandbox_dir: Path, scenario: Scenario) -> None:
         shutil.rmtree(sandbox_dir)
     sandbox_dir.mkdir(parents=True)
 
-    subprocess.run(["git", "init"], cwd=sandbox_dir, capture_output=True)
+    subprocess.run(["git", "init"], cwd=sandbox_dir, capture_output=True, timeout=5)
 
     for cmd in scenario.setup_commands:
         parts = shlex.split(cmd)
-        subprocess.run(parts, cwd=sandbox_dir, capture_output=True)
+        try:
+            subprocess.run(parts, cwd=sandbox_dir, capture_output=True, timeout=_SETUP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            log.warning("setup command timed out (timeout=%ss): %s", _SETUP_TIMEOUT, cmd)
+            continue
 
 
 def _process_assistant_message(msg: dict, pending: dict[str, dict], event_counter: int) -> int:
