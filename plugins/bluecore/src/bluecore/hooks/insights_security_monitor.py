@@ -49,6 +49,13 @@ MIN_CONTENT_LENGTH: int = 10
 MAX_SCAN_LENGTH: int = 4000
 DEFAULT_MODEL: str = "claude-opus"
 BLOCKING_SEVERITIES: frozenset = frozenset({"CRITICAL"})
+# insa-its の TOOL_DESCRIPTION_DIVERGENCE 検知器のみ対象。他の anomaly type
+# （CREDENTIAL_EXPOSURE 等）は単一フラグでも従来どおり CRITICAL を維持する。
+_DOWNGRADE_ANOMALY_TYPES: frozenset = frozenset({"TOOL_DESCRIPTION_DIVERGENCE"})
+# goal_shift_after_tool_load は他フラグとの共起有無で真偽を判定する補助フラグ
+# のため、有意フラグ数のカウントから除外する（insa-its 側 ai_monitor.py の
+# ToolDescriptionDivergenceAdapter と同じ扱い）。
+_NON_SIGNIFICANT_FLAGS: frozenset = frozenset({"goal_shift_after_tool_load"})
 
 
 def _resolve_audit_path() -> Path:
@@ -151,6 +158,41 @@ def get_anomaly_attr(anomaly: Any, key: str, default: str = "") -> str:
     return str(getattr(anomaly, key, default))
 
 
+def _effective_severity(anomaly: Any) -> str:
+    """TOOL_DESCRIPTION_DIVERGENCE の単一シグナル誤検知のみ severity を降格します。
+
+    insa-its の当該検知器は bytes<->str 変換呼び出し（decode/encode 等の
+    リテラル）だけで hidden_instructions_in_message フラグを単独で立てる
+    誤検知が多いため、goal_shift_after_tool_load を除いた有意フラグが
+    2件未満なら MEDIUM に降格します。他の anomaly type は対象外です。
+    トレードオフとして、同じ単一フラグ構成になる真の攻撃（誤検知と区別
+    できない場合）も同様に降格される点は承認済みの許容リスクです。
+
+    注記: このモジュールが呼ぶ insa-its API（tool_name 引数なし）では、
+    この anomaly type が生成しうる有意フラグは理論上最大1件のため、
+    「2件以上なら維持」の分岐は現状の呼び出し方では到達しません。
+    本関数は vendor 側の一般則をそのまま実装したものであり、呼び出し側が
+    将来 tool_name を渡すよう変更されれば同分岐は意味を持ちます
+    （docs/reports/plugin-verification-report-0.9.17.md §11.3 参照）。
+
+    Args:
+        anomaly: dict または属性アクセス可能な異常オブジェクトです。
+
+    Returns:
+        大文字化した実効 severity 文字列を返します。
+
+    Raises:
+        例外は発生しません。
+    """
+    severity: str = get_anomaly_attr(anomaly, "severity").upper()
+    if get_anomaly_attr(anomaly, "type") not in _DOWNGRADE_ANOMALY_TYPES:
+        return severity
+    details: Any = anomaly.get("details") if isinstance(anomaly, dict) else getattr(anomaly, "details", None)
+    flags: list[Any] = details.get("flags", []) if isinstance(details, dict) else []
+    significant: list[Any] = [flag for flag in flags if flag not in _NON_SIGNIFICANT_FLAGS]
+    return "MEDIUM" if len(significant) < 2 else severity
+
+
 def format_feedback(anomalies: list[Any]) -> str:
     """検出結果をフィードバック文に整形します。
 
@@ -242,17 +284,23 @@ def _handle_anomalies(anomalies: list[Any], data: dict[str, Any], text: str, con
         text: スキャン対象テキスト（文字数計上用）。
         context: 監査ログ用コンテキストラベル。
     """
+    effective_severities: list[str] = [_effective_severity(a) for a in anomalies]
     write_audit({
         "tool": data.get("tool_name", "unknown"),
         "context": context,
         "anomaly_count": len(anomalies),
         "anomaly_types": [get_anomaly_attr(a, "type") for a in anomalies],
+        "anomaly_severities": [get_anomaly_attr(a, "severity").upper() for a in anomalies],
+        "effective_severities": effective_severities,
         "text_length": len(text),
     })
     if not anomalies:
         log.debug("Clean -- no anomalies detected.")
         sys.exit(0)
-    has_critical: bool = any(get_anomaly_attr(a, "severity").upper() in BLOCKING_SEVERITIES for a in anomalies)
+    for a, effective in zip(anomalies, effective_severities, strict=True):
+        if isinstance(a, dict):
+            a["severity"] = effective
+    has_critical: bool = any(sev in BLOCKING_SEVERITIES for sev in effective_severities)
     feedback: str = format_feedback(anomalies)
     if has_critical:
         sys.exit(emit_block_output(feedback))
